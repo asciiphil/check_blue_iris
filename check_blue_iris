@@ -1,0 +1,127 @@
+#!/usr/bin/env python
+
+import json
+import optparse
+import hashlib
+import sys
+import urllib2
+
+RC_OK   = 0
+RC_WARN = 1
+RC_CRIT = 2
+RC_UNKN = 3
+
+parser = optparse.OptionParser()
+parser.add_option('-H', '--host', help='Hostname')
+parser.add_option('-P', '--port', type='int', default=81,
+                  help='Port (default 81)')
+parser.add_option('-S', '--ssl', action='store_true',
+                  help='Use SSL for Blue Iris communications (default is not to use SSL; passwords are still secret)')
+parser.add_option('-u', '--username', help='Username for login')
+parser.add_option('-p', '--password', help='Password for login')
+parser.add_option('-t', '--timeout', type='int', default=10,
+                  help='Number of seconds to wait for a response from server')
+(options, args) = parser.parse_args()
+
+if not options.host:
+    print 'You must specify a host to connect to.'
+    sys.exit(RC_UNKN)
+
+json_url = '%s://%s:%d/json' % ('https' if options.ssl else 'http', options.host, options.port)
+
+def send_command(cmd):
+    return json.loads(urllib2.urlopen(json_url, json.dumps(cmd), timeout=options.timeout).read())
+
+def summarize_problems(global_errors, global_warnings, cam_errors, cam_warnings):
+    """Returns a single string summarizing all of the problems given to it.
+
+    If there is only one problem, the text of that problem is returned,
+    prepended with either a "C:" or "W:" as appropriate.  If there are multiple
+    problems, the returned string starts with either "CRIT:" or "WARN:"
+    (depending on the worst problem passed) followed by counts of the various
+    problem types.  If there are no problems, a suitable message is returned."""
+    result = ''
+    if len(global_errors) + len(global_warnings) + len(cam_errors) + len(cam_warnings) > 1:
+        if len(global_errors) + len(cam_errors) > 0:
+            result += 'CRIT: '
+        else:
+            result += 'WARN: '
+        first = True
+        for c, m in [(global_errors, 'errors'), (global_warnings, 'warnings'), (cam_errors, 'camera errors'), (cam_warnings, 'camera warnings')]:
+            if len(c) > 0:
+                if not first:
+                    result += ', '
+                result += '%d %s' % (len(c), m)
+        result += ':'
+        return result
+    for c, m in [(global_errors, 'C'), (global_warnings, 'W'), (cam_errors, 'C'), (cam_warnings, 'W')]:
+        if len(c) > 0:
+            return '%s: %s' % (m, c[0])
+    return 'Everything is OK'
+
+def detail_problems(global_errors, global_warnings, cam_errors, cam_warnings):
+    """Returns an array of strings describing all of the given problems.
+
+    If only one problem is given, the returned array is empty; it's assumed that
+    the `summarize_problems()` function already giave that problem's details."""
+    if len(global_errors) + len(global_warnings) + len(cam_errors) + len(cam_warnings) <= 1:
+        # No detail necessary
+        return []
+    result = []
+    for l, m in [(global_errors, 'C'), (global_warnings, 'W'), (cam_errors, 'C'), (cam_warnings, 'W')]:
+        for c in l:
+            result.append('%s: %s' % (m, c))
+    return result
+    
+try:
+    result = send_command({'cmd': 'login'})
+    session = result['session']
+    response = hashlib.md5()
+    response.update(options.username or '')
+    response.update(':')
+    response.update(session)
+    response.update(':')
+    response.update(options.password or '')
+    result = send_command({'cmd':'login', 'session': session, 'response': response.hexdigest()})
+    if result['result'] != 'success':
+        print 'Could not log in:', result['data']['reason']
+        sys.exit(RC_UNKN)
+
+    global_errors = []
+    global_warnings = []
+    result = send_command({'cmd':'status', 'session':session})
+    if result['result'] != 'success':
+        global_errors.append('Could not fetch global status: %s' % result['data']['reason'])
+    elif result['data']['signal'] != '1':
+        global_warnings.append('Not recording')
+        
+    cam_errors = []
+    cam_warnings = []
+    result = send_command({'cmd':'camlist', 'session':session})
+    if result['result'] != 'success':
+        global_errors.append('Could not fetch camera list: %s' % result['data']['reason'])
+    else:
+        for cam in sorted(result['data'], key=lambda d: d['optionValue']):
+            if cam['optionDisplay'].startswith('+'):
+                # This is a camera group, not an individual camera.  Skip it.
+                continue
+            if 'isOnline' in cam and not cam['isOnline']:
+                cam_errors.append('%s not online' % cam['optionValue'])
+            elif 'isNoSignal' in cam and cam['isNoSignal']:
+                cam_errors.append('%s no signal' % cam['optionValue'])
+            elif 'isYellow' in cam and cam['isYellow']:
+                cam_warnings.append('%s has caution icon' % cam['optionValue'])
+
+    print summarize_problems(global_errors, global_warnings, cam_errors, cam_warnings)
+    details = detail_problems(global_errors, global_warnings, cam_errors, cam_warnings)
+    if details:
+        print '\n'.join(details)
+        
+    try:
+        send_command({'cmd':'logout'})
+    except:
+        # If the logout fails, we're not really worried.
+        pass
+except urllib2.URLError, e:
+    print 'Error fetching URL:', e
+    sys.exit(RC_UNKN)
