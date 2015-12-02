@@ -112,16 +112,22 @@ try:
             elif 'isYellow' in cam and cam['isYellow']:
                 cam_warnings.append('%s has caution icon' % cam['optionValue'])
 
-    print summarize_problems(global_errors, global_warnings, cam_errors, cam_warnings)
-    details = detail_problems(global_errors, global_warnings, cam_errors, cam_warnings)
-    if details:
-        print '\n'.join(details)
-        
     try:
         send_command({'cmd':'logout'})
     except:
         # If the logout fails, we're not really worried.
         pass
+
+    print summarize_problems(global_errors, global_warnings, cam_errors, cam_warnings)
+    details = detail_problems(global_errors, global_warnings, cam_errors, cam_warnings)
+    if details:
+        print '\n'.join(details)
+        
+    if len(global_errors) + len(cam_errors) > 0:
+        sys.exit(RC_CRIT)
+    if len(global_warnings) + len(cam_warnings) > 0:
+        sys.exit(RC_WARN)
+    sys.exit(RC_OK)
 except urllib2.URLError, e:
     print 'Error fetching URL:', e
     sys.exit(RC_UNKN)
